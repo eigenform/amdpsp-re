@@ -1,0 +1,431 @@
+#!/usr/bin/python3
+
+""" amdpsp-dig
+
+Scrape PSP binaries from AGESA firmware images.
+
+Prior Art
+=========
+
+See the following repositories for other implementations:
+
+https://github.com/system76/romulan
+https://github.com/PSPReverse/PSPTool
+
+"""
+
+from sys import argv
+from hexdump import hexdump
+from struct import unpack, iter_unpack
+import hashlib
+import zlib
+
+LIBRARY = {}
+for i in range(0, 0x100): LIBRARY[i] = {}
+
+def chipset_name(x):
+    match x:
+        case b'TMLB':       return "TMLB?"
+        case b'PZLB':       return "PZLB?"
+        case b'VRLB':       return "VRLB?"
+        case b'BXLB':       return "BXLB?"
+        case b'RV1\x00':    return "Raven Ridge (1)?"
+        case b'RN\x20\x20': return "Renoir?"
+        case b'CP\x00\x00': return "Castle Peak??"
+        case b'VMR\x00':    return "Vermeer?"
+        case b'BXB\x00':    return "Bixby?"
+        case b'MTS\x00':    return "Matisse?"
+        case _:
+            raise Exception("Unknown chipset {}".format(x))
+
+
+def entry_filename(x):
+    """ Return a filename for a particular entry type """
+    match x:
+        case 0x00: return "PUBKEY_AMD"
+        case 0x01: return "PSP_BL"
+        case 0x02: return "PSP_TOS"
+        case 0x03: return "PSP_RBL"
+        case 0x04: return "PSP_NVRAM"
+        case 0x05: return "PUBKEY_PSP_RTM"
+        case 0x06: return "X86_BOOTSTRAP"
+        case 0x08: return "SMU_FW"
+        case 0x09: return "PUBKEY_DBG_UNLOCK"
+        case 0x0a: return "PUBKEY_OEM"
+        case 0x0b: return "PSP_SOFTFUSE_CHAIN"
+        case 0x0c: return "PSP_TRUSTLET"
+        case 0x0d: return "PUBKEY_PSP_TRUSTLET"
+        case 0x12: return "SMU_FW2"
+        case 0x13: return "PSP_DBG_UNLOCK"
+        case 0x20: return "HW_IP_DISCOVERY"
+        case 0x21: return "WRAPPED_IKEK"
+        case 0x22: return "PSP_TOKEN_UNLOCK"
+        case 0x24: return "GASKET_POLICY"
+        case 0x25: return "MP2_SMU_FW"
+        case 0x26: return "MP2_SMU_FW2"
+        case 0x27: return "USERMODE_UNIT_TEST"
+        case 0x28: return "PSP_TOS_DRIVER"
+        case 0x29: return "KVM_ENGINE"
+        case 0x2a: return "MP5_FW"
+        case 0x2b: return "EMBEDDED_FW_SIG"
+        case 0x2c: return "TEE_NVRAM"
+        case 0x2d: return "AGESA_RUNTIME_DRIVER_SOI3"
+        case 0x2e: return "MP0_FW_EXT_CHIPSET"
+        case 0x2f: return "MP1_FW_EXT_CHIPSET"
+        case 0x30: return "ABL0"
+        case 0x31: return "ABL1"
+        case 0x32: return "ABL2"
+        case 0x33: return "ABL3"
+        case 0x34: return "ABL4"
+        case 0x35: return "ABL5"
+        case 0x36: return "ABL6"
+        case 0x37: return "ABL7"
+        case 0x38: return "SEV_DATA"
+        case 0x39: return "SEV_CODE"
+        case 0x3a: return "PSP_WHITELIST"
+        case 0x3c: return "VBIOS_BL"
+        case 0x42: return "DXIO_PHY_SRAM_FW"
+        case 0x43: return "PUBKEY_DXIO_PHY_SRAM_FW"
+        case 0x44: return "UNIFIED_USB_PHY_FW"
+        case 0x45: return "TOS_POLICY_L1"
+        case 0x46: return "BIXBY_BOOTROM?"
+        case 0x47: return "DRTM_TRUSTED_APP"
+        case 0x4e: return "PUBKEY_PMU_FW"
+        case 0x50: return "PUBKEY_TABLE_PSP_BL"
+        case 0x51: return "PUBKEY_TABLE_PSP_TOS"
+        case 0x52: return "PSP_BL_OEM_PROGRAM"
+        case 0x58: return "DMCU_ERAM"
+        case 0x59: return "DMCU_ISR_FW"
+        case _: return "UNK_{:02x}".format(x)
+
+
+def entry_name(x):
+    """ Return a description for an entry type """
+    match x:
+        case 0x00: return "Public Key (AMD)"
+        case 0x01: return "PSP Bootloader"
+        case 0x02: return "PSP Secure OS"
+        case 0x03: return "PSP Recovery Bootloader"
+        case 0x04: return "PSP NVRAM Data (?)"
+        case 0x05: return "Public Key (PSP RTM ?)"
+        case 0x06: return "X86 Bootstrap Stub?"
+        case 0x08: return "SMU Off-Chip Firmware"
+        case 0x09: return "Public Key (AMD Secure Debug Unlock)"
+        case 0x0a: return "Public Key (OEM)"
+        case 0x0b: return "PSP Soft-fuse Chain"
+        case 0x0c: return "PSP Trustlet Binary"
+        case 0x0d: return "Public Key (PSP Trustlet ?)"
+        case 0x12: return "SMU Off-Chip firmware (section 2)"
+        case 0x13: return "PSP Secure Debug Unlock (debug image)"
+        case 0x20: return "HW IP Discovery/Config (?)"
+        case 0x21: return "Wrapped IKEK"
+        case 0x22: return "PSP Token Unlock Data"
+        case 0x24: return "Security Gasket Policy Binary (?)"
+        case 0x25: return "MP2 (SMU) firmware"
+        case 0x26: return "MP2 (SMU) firmware (section 2?)"
+        case 0x27: return "User Mode Unit Test (?)"
+        case 0x28: return "PSP Secure OS System Driver"
+        case 0x29: return "KvmEngineDummy?"
+        case 0x2a: return "MP5 Firmware (?)"
+        case 0x2b: return "Embedded Firmware Signature (?)"
+        case 0x2c: return "TEE NVRAM (?)"
+        case 0x2d: return "AGESA Runtime Driver? (SOI3?)"
+        case 0x2e: return "MP0 Firmware (External Chipset?)"
+        case 0x2f: return "MP1 Firmware (External Chipset?)"
+        case 0x30: return "AGESA Bootloader (ABL) 0"
+        case 0x31: return "AGESA Bootloader (ABL) 1"
+        case 0x32: return "AGESA Bootloader (ABL) 2"
+        case 0x33: return "AGESA Bootloader (ABL) 3"
+        case 0x34: return "AGESA Bootloader (ABL) 4"
+        case 0x35: return "AGESA Bootloader (ABL) 5"
+        case 0x36: return "AGESA Bootloader (ABL) 6"
+        case 0x37: return "AGESA Bootloader (ABL) 7"
+        case 0x38: return "SEV Data (?)"
+        case 0x39: return "SEV Code (?)"
+        case 0x3a: return "PSP Processor Whitelist Data (?)"
+        case 0x3c: return "VBIOS Bootloader (?)"
+        case 0x40: return "PSP Directory Table (level 2)"
+        case 0x42: return "DXIO PHY SRAM Firmware (?)"
+        case 0x43: return "Public Key (DXIO PHY SRAM Firmware ?)"
+        case 0x44: return "Unified USB PHY Firmware (?)"
+        case 0x45: return "Trusted OS Secure Policy L1 (?)"
+        case 0x46: return "Bixby Boot ROM (?)"
+        case 0x47: return "DRTM Trusted App (?)"
+        case 0x49: return "BIOS Table (?)"
+        case 0x4e: return "Public Key (PHY Microcontroller ?)"
+        case 0x50: return "Public Key Table (PSP Bootloader)"
+        case 0x51: return "Public Key Table (PSP Trusted OS)"
+        case 0x52: return "PSP Bootloader Usermode/OEM Program"
+        case 0x54: return "RPMC NVRAM (?)"
+        case 0x55: return "SplTableBl (?)"
+        case 0x58: return "Display Microcontroller ERAM (?)"
+        case 0x59: return "Display Microcontroller ISR Firmware (?)"
+        case 0x5a: return "MSMU (?)"
+        case 0x5c: return "SPI ROM Config (?)"
+        case 0x5f: return "AMD_FW_PSP_SMUSCS"
+        case 0x71: return "DMCUB (?)"
+        case _: return "UNK_{:02x}".format(x)
+
+
+
+def find_magic(data: bytes, magic: bytes) -> list:
+    """ Return a list of offsets for some set of bytes """
+    cur = 0
+    offsets = []
+    while cur < len(data):
+        off = data[cur:].find(magic)
+        if off == -1:
+            break
+        offsets.append(cur + off)
+        cur = cur + off + len(magic)
+    return offsets
+
+
+def parse_directory(fn, data, off):
+    """ Parse a PSP Directory """
+
+    hdr_off = off
+    ent_off = hdr_off + 0x10
+    hdr_data = data[hdr_off:hdr_off+0x10]
+    chksum, num_ent, reserved = unpack("<LLL", hdr_data[0x04:])
+
+    match data[hdr_off:hdr_off+0x04]:
+        case b'$PSP': 
+            print("[*] Found PSP Directory    off={:08x} num_ent={:08x}".format(
+                off, num_ent))
+            if num_ent > 37:
+                print("Skipping directory (has {:08x} entries??)".format(num_ent))
+                return
+        case b'$PL2': 
+            print("[*] Found PSP L2 Directory off={:08x} num_ent={:08x}".format(
+                off, num_ent))
+            if num_ent > 37:
+                print("Skipping directory (has {:08x} entries??)".format(num_ent))
+                return
+        case _: 
+            raise Exception("Invalid directory (magic {})".format(off[0x00:0x04]))
+
+    print("Parsing directory ({} entries) ...".format(num_ent))
+    ent_data = data[ent_off:(ent_off + (num_ent * 0x10))]
+    for (typ, sub_prog, _, size, loc) in iter_unpack("<BBHLQ", ent_data):
+        print("subprog={:04x} size={:08x} loc={:016x} {:02x} {}".format(
+            sub_prog, size, loc, typ, entry_name(typ)
+        ))
+        if size == 0xffffffff or size == 0: continue
+
+        # The offsets depend on the size of the firmware image
+        # This is kinda ugly, but it works
+        if   len(data) == 0x02000000: addr = (loc & 0x00ffffff)
+        elif len(data) == 0x02001000: addr = (loc & 0x00ffffff) + 0x1000
+        elif len(data) == 0x01001000: addr = (loc & 0x00ffffff) + 0x1000
+        elif len(data) == 0x01000800: addr = (loc & 0x00ffffff) + 0x0800
+        elif len(data) == 0x01000000: addr = (loc & 0x00ffffff)
+        elif len(data) == 0x00801000: addr = (loc & 0x007fffff) + 0x1000
+        elif len(data) == 0x00800000: addr = (loc & 0x007fffff)
+        else:
+            raise Exception("Unhandled image size {:08x}".format(len(data)))
+        if off >= 0x01000000: addr += 0x01000000
+
+        match typ:
+            # Recurse into subdirectories
+            case 0x40:
+                parse_directory(fn, data, addr)
+            # BIOS Directory table
+            case 0x46:
+                continue
+            # Parse entries
+            case _:
+                parse_entry(fn, typ, data, addr, size)
+        print()
+
+
+# I don't particularly care about looking at these entries right now
+SKIP_TYPES = [
+        # Key material
+        0x00, 0x05, 0x09, 0x0a, 0x0d, 0x21, 0x43, 0x4e,
+        # Token Unlock data (always empty)
+        0x22,
+        # NVRAM data, should be flat binary data
+        0x04, 0x54,
+        # Flat data, usually empty?
+        0x38,
+        # NOTE: Is this like, the x86 boot stub or something? No clue.
+        0x06,
+        # Blob starts with '!SCSCarrizo' (carrizo is an Excavator APU?)
+        0x5f,
+        # Empty data?
+        0x1a,
+        # KvmEngineDummy, empty?
+        0x29,
+        # unknown blob
+        0x63, 
+]
+
+# Entry types with a consistent 0x100-byte header
+HDR_TYPES = [
+        0x01, 0x02, 0x03, 0x08, 0x0c,
+        0x10, 0x12, 0x13, 0x14, 
+        0x20, 0x24, 0x25, 0x28, 0x2a, 0x2d, 0x2e, 0x2f,
+        0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x39, 0x3c,
+        0x42, 0x44, 0x45, 0x47, 0x4c, 0x4d,
+        0x50, 0x51, 0x58, 0x59, 0x5c,
+        # These seem like the ABL entries, maybe old?
+        0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6,
+]
+
+def parse_entry(fn, typ, data, off, size):
+    """ Parse an entry in some PSP directory """
+    if typ in SKIP_TYPES: return;
+    edata = data[off:off+size]
+    if typ in HDR_TYPES:
+        hdr_data   = edata[0x000:0x100]
+        print(hexdump(hdr_data))
+        content    = edata[0x100:]
+
+        # Don't know exactly what this is
+        unk_bytes  =              hdr_data[0x000:0x010]
+        # Some entries have no magic
+        magic      =              hdr_data[0x010:0x014]
+        # ????
+        sz_signed  = unpack("<L", hdr_data[0x014:0x018])[0]
+        # Set to 1 when this entry is encrypted with the wrapped key
+        is_enc     = unpack("<L", hdr_data[0x018:0x01c])[0] == 1
+        # IV associated with the wrapped key
+        iv_bytes   =              hdr_data[0x020:0x030]
+        # Set to 1 when this entry is signed
+        is_signed  = unpack("<L", hdr_data[0x030:0x034])[0] == 1
+        unk_34     = unpack("<L", hdr_data[0x034:0x038])[0]
+        # Is this a hash?
+        sig_bytes  =              hdr_data[0x038:0x048]
+        # Set to 1 when this entry is compressed
+        is_comp    = unpack("<L", hdr_data[0x048:0x04c])[0] == 1
+        # Uncompressed size
+        uncomp_sz  = unpack("<I", hdr_data[0x050:0x054])[0]
+        # Compressed size
+        comp_sz    = unpack("<L", hdr_data[0x054:0x058])[0]
+        # Version number
+        version    = unpack("<L", hdr_data[0x060:0x064])[0]
+        # Some kind of magic bytes describing the associated chipset?
+        chipset    =              hdr_data[0x064:0x068]
+        # Load address for binaries?
+        addr       = unpack("<L", hdr_data[0x068:0x06c])[0]
+        # The size of this entry?
+        rom_sz     = unpack("<L", hdr_data[0x06c:0x070])[0]
+        # The entry type
+        entry_id   = unpack("<B", hdr_data[0x07c:0x07d])[0]
+        # Wrapped key
+        wkey_bytes =              hdr_data[0x080:0x090]
+
+        print("{:08x}".format(addr))
+
+        #print("size        {:08x}".format(size))
+        #print("magic       {}".format(magic))
+        #print("signed size {:08x}".format(sz_signed))
+        #print("encrypted   {}".format(is_enc))
+        #print("signed      {}".format(is_signed))
+        #print("unk_34      {:08x}".format(unk_34))
+        #print("compressed  {}".format(is_comp))
+        #print("uncomp size {:08x}".format(uncomp_sz))
+        #print("comp size   {:08x}".format(comp_sz))
+        #print("version     {:08x}".format(version))
+        #print("chipset?    {}".format(chipset))
+        #print("addr        {:08x}".format(addr))
+        #print("rom size    {:08x}".format(rom_sz))
+        #print("entry_id    {:02x}".format(entry_id))
+
+        # Skip any encrypted entries (for now?) - we'd need to unwrap the
+        # IKEK, and I'm pretty sure this involves using the CCP? 
+        # Linux CCP drivers seem to be broken on lots of client machines
+        # due to UEFI firmware issues (including mine)
+        if is_enc: 
+            print("[*] Skipping encrypted entry")
+            return
+
+        # Handle compressed entries
+        if not is_comp:
+            fdata = content
+        else:
+            cdata = content[0:comp_sz]
+            match cdata[0x00:0x02]:
+                case b'\x78\xda': print("[*] zlib best compression")
+                case b'\x78\x9c': print("[*] zlib default compression")
+                case b'\x78\x5e': print("[*] zlib compressed")
+                case b'\x78\x01': print("[*] zlib no compression")
+                case _: 
+                    # Not exactly sure what's up with this
+                    print("[!] No zlib header?")
+                    return
+            try:
+                udata = zlib.decompress(cdata)
+            except zlib.error as e:
+                print("[!] Failed to decompress")
+                print(hexdump(cdata[0:0x100]))
+                return
+            print("[*] Decompressed to {:08x} bytes".format(len(udata)))
+            if len(udata) != uncomp_sz:
+                raise Exception("Uncompressed less data than expected")
+            fdata = udata
+
+    # This entry has no defined format; this is the best we can do for now
+    else:
+        version = 0
+        fdata = edata
+        print("[!] No defined formatting for this entry")
+        print(hexdump(fdata))
+        raise Exception("Undefined entry format")
+
+    sha1 = hashlib.sha1(fdata).hexdigest()
+    if LIBRARY[typ].get(sha1) != None:
+        LIBRARY[typ][sha1]['obs'] += 1
+    else:
+        LIBRARY[typ][sha1] = { 
+            "file": fn, 
+            "size": len(fdata), 
+            "obs": 1,
+            "data": fdata,
+            "ver": version,
+        }
+
+def parse_image(fn, data):
+    """ Find and parse all of the PSP directories in a firmware image """
+    offsets = find_magic(data, b"$PSP")
+    for off in offsets:
+        if (off & 0xff) != 0: continue
+        parse_directory(fn, data, off)
+        print()
+
+
+if __name__ == "__main__":
+    if len(argv) < 2:
+        print("usage: amdpsp-dig [files]")
+        exit(-1)
+    # Parse all of the provided files
+    for filename in argv[1:]:
+        with open(filename, "rb") as f:
+            data = f.read()
+            print("[*] Parsing file '{}' ({:08x} bytes)".format(
+                filename, len(data))
+            )
+            parse_image(filename, data)
+            print("="*80)
+    ## Print all of the unique entries we observed
+    for x in LIBRARY:
+        if len(LIBRARY[x]) == 0: continue
+        print("Observed for Type {:02x} ({})".format(x, entry_name(x)))
+        for sha1 in LIBRARY[x]:
+            size = LIBRARY[x][sha1]['size']
+            fn   = LIBRARY[x][sha1]['file']
+            obs  = LIBRARY[x][sha1]['obs']
+            ver  = LIBRARY[x][sha1]['ver']
+            print("  {} ver={:08x} size={:08x} file={} obs={}".format(
+                sha1, ver, size, fn, obs
+            ))
+
+            # Write all unique images to /tmp/
+            outfn = "{}_{:08x}_{}.bin".format(entry_filename(x), ver, sha1[0:8])
+            outpath = "/tmp/{}".format(outfn)
+            #with open(outpath, "wb") as f: f.write(LIBRARY[x][sha1]['data'])
+
+        print()
+
+
