@@ -51,6 +51,7 @@ MP1    - Usually refers to the System Management Unit (SMU)?
 MP2    - Microprocessor related to the Sensor Fusion Hub (SFH) and I2C?
          I think this is only relevant for APUs (i.e. in laptops)?
 MP5    - Microprocessor related to a Base Management Controller? (BMC)
+PMU    - PHY Microcontroller
 PSP    - Platform Security Processor
 SFH    - Sensor Fusion Hub
 SMU    - System Management Unit
@@ -92,6 +93,7 @@ PHY    - Physical Layer
          PMD - Physical Medium Dependent Layer
          PMA - Physical Medium Attachment Layer
          PCS - Physical Coding Sublayer
+SPD    - Serial presence detect (DIMM/RAM discovery?)
 
 ```
 

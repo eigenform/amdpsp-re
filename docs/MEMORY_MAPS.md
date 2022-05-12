@@ -96,7 +96,7 @@ Otherwise, these come from usage in PSP binaries.
 Some of these are *most likely* specific to a particular family or chipset.
 
 ```
-Physical address range       Description
+Address range               Description
 ----------------------------------------------------
 
 [0x0001_c000 - ??????????]: ??? Northbridge PCIe register space? (bootloader)
@@ -194,7 +194,7 @@ not clear if this is exactly the same across the client/server platforms
 (probably not):
 
 ```
-Physical address range       Description
+Physical address    Description
 ----------------------------------------------------
 [0x0000_0000_0000]: LPC/SPI ROM
 
@@ -202,7 +202,8 @@ Physical address range       Description
 [0x0000_fec1_0000]: FCH::ITF_SPI
 [0x0000_fec2_0000]: FCH::ITF_ESPI
 [0x0000_fed0_0000]: FCH::TMR::HPET
-[0x0000_fed8_0000 - 0x0000_0000_fed8_1fff]: ACPI
+
+[0x0000_fed8_0000]: Base of ACPI MMIO regions
 	[0x0000_fed8_0000]: FCH::USBLEGACY
 	[0x0000_fed8_0200]: FCH::SMI
 	[0x0000_fed8_0300]: FCH::PM
