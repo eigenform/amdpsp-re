@@ -6,25 +6,31 @@ different acronyms. Here's a couple:
 ```
 # Bus and Interconnect
 
-CS     - Coherent Slave (on the Data Fabric)
-CCM    - Cache-coherent Master (x86 cores on the Data Fabric?)
-DF     - Data Fabric (also see "SDF")
-DXIO   - Distributed IO [Crossbar] (PHY muxing?)
+
+SDF    - Scalable Data Fabric (sometimes just "DF")
+SDP    - Scalable Data Port (data fabric link)
 SCF    - Scalable Control Fabric
-SDF    - Scalable Data Fabric (usually just DF for "Data Fabric")
-SDP    - Scalable Data Port (interface to data fabric)
-SMN    - System Management Network
-
+CS     - Coherent Slave (on the Data Fabric)
+CCM    - Cache-coherent Master (ie. x86 cores on the data fabric?)
+IOMS   - IO Master/Slave
 IFOP   - Infinity Fabric [On-Package]
-GMI    - [On-die] Global Memory Interconnect
-XGMI   - [Inter-socket] Global Memory Interconnect
 
-CAKE   - Coherent AMD socKet Extender (inter-socket Data Fabric link)
-WAFL   - [Inter-socket] Control Fabric link?
-TWIX   - [On-die] Control Fabric link?
-PIE    - "Power, Interrupts, Etc.?"
+TWIX   - Intra-socket control fabric interface?
+WAFL   - Inter-socket control fabric interface?
+CAKE   - Inter-socket data fabric link? ("Coherent AMD socKet Extender")
+GMI    - Intra-socket data fabric interface?
+XGMI   - Inter-socket data fabric interface?
 
-IOHC   - IOHUB Core (crossbar)
+PIE    - "Power, Interrupts, Etc?"
+SMN    - System Management Network
+IOHC   - IOHUB Core [Crossbar]
+DXIO   - Distributed IO [Crossbar] (PHY muxing?)
+NBIO   - Northbridge IO
+NBIF   - Northbridge Interface?
+
+GMHUB  - Graphics Memory Hub
+MMHUB  - Multimedia Hub
+ATHUB  - Address Translation Hub
 IOHUB  - IOMMU-mediated interface to the Data Fabric
 SYSHUB - Switching/arbitration between I/O devices and data fabric?
          See PPR for AMD Family 19h Model 51h A1:
@@ -33,8 +39,6 @@ SYSHUB - Switching/arbitration between I/O devices and data fabric?
          > efficiently access the memory controllers on the system while 
          > allowing efficient priority control for preventing any single high 
          > speed interface from dominating the memory controller.
-
-NBIO   - Northbridge IO
 
 # Components on the *package*
 CCD    - Core Complex Die
@@ -55,8 +59,7 @@ PMU    - PHY Microcontroller
 PSP    - Platform Security Processor
 SFH    - Sensor Fusion Hub
 SMU    - System Management Unit
-UMC    - Unified Memory Controller (DDR4 controller)
-
+UMC    - Unified Memory Controller (DDR controller)
 SBI    - Sideband Interface
 SB-RMI - Sideband [Remote Management] Interface
 SB-TSI - Sideband [Thermal Sensor?] Interface
@@ -66,8 +69,12 @@ AEB    - Attestation Evidence Broker
 ARB    - Anti-Rollback
 DRTM   - Dynamic Root for Trusted Measurement
 KDS    - Key Distribution System
-OTP    - One-time Programmable (Memory)
 RPMC   - Replay Protected Monotonic Counter
+OTP    - One-time Programmable (Memory)
+PDS    - ???
+PSB    - Platform Secure Boot
+SEV    - Secure Encrypted Virtualization
+SNP    - Secure Nested Paging
 SOS    - Secure Operating System
 SPL    - Secure Patch Level
 SVN    - Secure Version Number
@@ -84,7 +91,17 @@ AGESA  - AMD Generic Encapsulated Software Architecture
 APCB   - AMD PSP Customization Block
 APOB   - AGESA PSP Output Buffer
 CBS    - Custom BIOS Settings (settings defined by the OEM?)
+CPB    - Core Performance Boost?
 CRB    - Customer Reference Board
+EFS    - Embedded File System (?)
+
+# APU/GPU-related
+CP     - Command Processor
+CVIP   - Computer Vision Image Processing?
+DCHUB  - Display Controller Hub?
+DCN    - Display Core Next
+DCCG   - Display Controller Clock Generation
+SDPIF  - Scalable Data Port Interface
 
 # Generic/Misc.
 AXI    - Advanced eXtensible Interface (an AMBA bus protocol)
@@ -94,6 +111,8 @@ PHY    - Physical Layer
          PMA - Physical Medium Attachment Layer
          PCS - Physical Coding Sublayer
 SPD    - Serial presence detect (DIMM/RAM discovery?)
+NTB    - PCIe "Non-Transparent Bridging"
+PTDMA  - PCIe "Passthrough DMA"
 
 ```
 

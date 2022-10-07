@@ -1,0 +1,135 @@
+#!/usr/bin/python3
+
+""" uefi-dig - Scan AGESA firmware images for UEFI binaries """
+
+from sys import argv
+from hexdump import hexdump
+from struct import unpack, iter_unpack
+import pefile
+import hashlib
+import zlib
+import re
+import pathlib
+from datetime import datetime
+
+from uefi_firmware.uefi import *
+from uefi_firmware.utils import *
+
+
+database = {}
+
+def add_artifact(data, filename, kind):
+    """ Add an artifact to the database """
+
+    sha1 = hashlib.sha1(data).hexdigest()
+    try:
+        pe = pefile.PE(data=data)
+        sections = [ 
+            (s.Name.decode().rstrip('\x00'), s.SizeOfRawData) 
+            for s in pe.sections 
+        ]
+        key = str(sections)
+    except pefile.PEFormatError:
+        sections = []
+        key = sha1
+        pass
+
+    if database.get(key) != None:
+        database[key]['obs'] += 1
+    else:
+        print("Found {} {}, {} entries".format(
+            filename, sha1[:8], len(database)
+        ))
+        database[key] = {
+            'file': filename,
+            'sections': sections,
+            'sha1': sha1,
+            'obs': 1,
+            'kind': kind,
+            'data': data,
+        }
+
+def parse_file(ob):
+    """ Try to find binaries within an object and add them to the database """
+    this = ob['_self']
+    assert ob['type'] == "FirmwareFile"
+    type_name = ob['attrs']['type_name']
+
+    # We can skip over these objects?
+    match type_name:
+        case "ffs padding": return
+        case "freeform":    return
+        case "firmware volume image": return
+        case _: pass
+
+    # Try to discover a human-readable name for this object
+    name = "unk-{}".format(ob['guid'])
+    for section in this.sections:
+        print("section {:02x} {}".format(section.type, 
+            EFI_SECTION_TYPES[section.type]))
+        match section.type:
+            case 0x15: name = section.name
+            case 0x14: 
+                print(section.data)
+            case _: pass
+
+    # Add binaries to the database
+    for section in this.sections:
+        match section.type:
+            # RAW section
+            case 0x19: 
+                pass
+            case 0x12: 
+                add_artifact(section.data, name, "te")
+            case 0x11: 
+                add_artifact(section.data, name, "pic.pe")
+            case 0x10: 
+                add_artifact(section.data, name, "pe")
+            case _: 
+                pass
+
+def scan_uefi(data):
+    """ Find all the volumes and iterate over a flattened list of objects """
+    vols = find_volumes(data)
+    for v in vols:
+        for ob in flatten_firmware_objects(v.iterate_objects(include_content=True)):
+            if "type" in ob and ob['type'] == "FirmwareFile":
+                parse_file(ob)
+
+
+if __name__ == "__main__":
+    if len(argv) < 2:
+        print("usage: uefi-dig [files]")
+        exit(-1)
+
+    dt = datetime.now()
+    dir_name = "uefi-dig-{}".format(dt.strftime("%m%d%Y-%H%M%S"))
+
+    # Parse all of the provided files
+    for filename in argv[1:]:
+        with open(filename, "rb") as f:
+            data = f.read()
+            print("[*] Checking file '{}' ({:08x} bytes)".format( filename, len(data)))
+            scan_uefi(data)
+
+
+    if len(database) == 0:
+        print("No artifacts found")
+        exit()
+    
+    pathlib.Path("/tmp/{}".format(dir_name)).mkdir()
+    
+    print("Found {} artifacts".format(len(database)))
+    total = 0
+
+    for (dig, entry) in sorted(database.items(), key=lambda x: x[1]['file']):
+        total += len(entry['data'])
+        print("{:32} {:5} {} obs={:4}".format(
+            entry['file'], entry['kind'], entry['sha1'], entry['obs']
+        ))
+        path = "/tmp/{}/{}-{}.{}".format(dir_name,
+                entry['file'], entry['sha1'][:8], entry['kind']
+        )
+        with open(path, "wb") as f: f.write(entry['data'])
+
+

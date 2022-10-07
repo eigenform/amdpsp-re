@@ -1,6 +1,7 @@
 # amdpsp-re
 
-Notes and tools for looking at AMD Platform Security Processor (PSP) binaries.
+Tools for looking at AMD Platform Security Processor (PSP) binaries, AGESA
+firmware images, and other observations about AMD platform security.
 
 - [docs/](./docs) - Notes on various things
 - [bin/](./bin) - Scripts
@@ -14,7 +15,5 @@ distributed as encrypted blobs.
 
 This work is mostly informed by the 2019 TU-Berlin research targeting Zen 1 
 machines. For more details, see [PSPReverse/psp-docs](https://github.com/PSPReverse/psp-docs).
-
-
 
 

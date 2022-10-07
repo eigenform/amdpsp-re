@@ -3,6 +3,7 @@
 """ amdpsp-dig
 
 Scrape PSP binaries from AGESA firmware images.
+Intended to be run on *lots* of firmware images at once.
 
 Prior Art
 =========
@@ -12,31 +13,55 @@ See the following repositories for other implementations:
 https://github.com/system76/romulan
 https://github.com/PSPReverse/PSPTool
 
+Other Notes
+===========
+
+FYI: Parsing for AM5 firmware images might be partially/totally broken.
+
 """
 
 from sys import argv
 from hexdump import hexdump
 from struct import unpack, iter_unpack
+import pathlib
 import hashlib
 import zlib
+import json
 
-LIBRARY = {}
-for i in range(0, 0x100): LIBRARY[i] = {}
+# Preserve discovered binaries across runs.
+LIBRARY      = {}
+LIBRARY_FILE = "/tmp/amdpsp-dig.json"
+LIBRARY_DIR  = "/tmp/amdpsp"
 
-def chipset_name(x):
-    match x:
-        case b'TMLB':       return "TMLB?"
-        case b'PZLB':       return "PZLB?"
-        case b'VRLB':       return "VRLB?"
-        case b'BXLB':       return "BXLB?"
-        case b'RV1\x00':    return "Raven Ridge (1)?"
-        case b'RN\x20\x20': return "Renoir?"
-        case b'CP\x00\x00': return "Castle Peak??"
-        case b'VMR\x00':    return "Vermeer?"
-        case b'BXB\x00':    return "Bixby?"
-        case b'MTS\x00':    return "Matisse?"
-        case _:
-            raise Exception("Unknown chipset {}".format(x))
+try:
+    pathlib.Path(LIBRARY_DIR).mkdir()
+except FileExistsError:
+    pass
+try:
+    with open(LIBRARY_FILE) as f:
+        LIBRARY = json.load(f)
+    print("Loaded from {}".format(LIBRARY_FILE))
+except FileNotFoundError:
+    print("No library found")
+    for i in range(0, 0x100): 
+        LIBRARY[str(i)] = {}
+
+def add_to_library(filename, typ, data, version):
+    """ Add an entry to the library """
+    type_key = str(typ)
+    sha1 = hashlib.sha1(data).hexdigest()
+    if LIBRARY[type_key].get(sha1) != None:
+        LIBRARY[type_key][sha1]['obs'] += 1
+    else:
+        outname = "{}_{:08x}_{}.bin".format(entry_filename(typ), version, sha1[:8])
+        outfile = "{}/{}".format(LIBRARY_DIR, outname)
+        with open(outfile, "wb") as f: f.write(data)
+        LIBRARY[type_key][sha1] = { 
+            "file": filename, 
+            "size": len(data), 
+            "obs": 1,
+            "ver": version,
+        }
 
 
 def entry_filename(x):
@@ -151,7 +176,9 @@ def entry_name(x):
         case 0x45: return "Trusted OS Secure Policy L1 (?)"
         case 0x46: return "Bixby Boot ROM (?)"
         case 0x47: return "DRTM Trusted App (?)"
+        case 0x48: return "PSP Directory Table Backup?"
         case 0x49: return "BIOS Table (?)"
+        case 0x4a: return "PSP Directory Table Backup?"
         case 0x4e: return "Public Key (PHY Microcontroller ?)"
         case 0x50: return "Public Key Table (PSP Bootloader)"
         case 0x51: return "Public Key Table (PSP Trusted OS)"
@@ -162,8 +189,11 @@ def entry_name(x):
         case 0x59: return "Display Microcontroller ISR Firmware (?)"
         case 0x5a: return "MSMU (?)"
         case 0x5c: return "SPI ROM Config (?)"
-        case 0x5f: return "AMD_FW_PSP_SMUSCS"
+        case 0x5f: return "Pluton Platform FW (?)"
+        case 0x6a: return "MP2 Firmware Config"
         case 0x71: return "DMCUB (?)"
+        case 0x73: return "PSP Bootloader 2 (?)"
+        case 0x8d: return "IKEK TA (?)"
         case _: return "UNK_{:02x}".format(x)
 
 
@@ -180,73 +210,200 @@ def find_magic(data: bytes, magic: bytes) -> list:
         cur = cur + off + len(magic)
     return offsets
 
-
-def parse_directory(fn, data, off):
-    """ Parse a PSP Directory """
-
+# NOTE: These are really only observed in AM5 firmware images?
+def parse_backup_directory(fn, data, off):
+    MAX_ENTRIES = 40
     hdr_off = off
     ent_off = hdr_off + 0x10
     hdr_data = data[hdr_off:hdr_off+0x10]
     chksum, num_ent, reserved = unpack("<LLL", hdr_data[0x04:])
+    match data[hdr_off:hdr_off+0x04]:
+        case b'$PSP': 
+            print("[*] Found PSP backup Directory    off={:08x} num_ent={:08x}".format(
+                off, num_ent))
+            if num_ent > MAX_ENTRIES:
+                print("Skipping directory (has {:08x} entries??)".format(num_ent))
+                return
+        case b'$PL2': 
+            print("[*] Found PSP L2 backup Directory off={:08x} num_ent={:08x}".format(
+                off, num_ent))
+            if num_ent > MAX_ENTRIES:
+                print("Skipping directory (has {:08x} entries??)".format(num_ent))
+                return
+        case _: 
+            print(hexdump(data[hdr_off:hdr_off+0x100]))
+            raise Exception("Invalid directory (magic {})".format(hdr_data[0x00:0x04]))
+
+    ent_data = data[ent_off:(ent_off + (num_ent * 0x10))]
+    for (typ, sub_prog, _, size, loc) in iter_unpack("<BBHLQ", ent_data):
+
+        # This is specific to the "backup tables" observed in x670.
+        # It seems like 0x93 is the only exception, and the addressing
+        # isn't relative to the directory offset. 
+        match typ:
+            case 0x93: addr = loc & 0xffffffff
+            case _:    addr = (loc + off) & 0xffffffff
+
+        print("  subprog={:04x} size={:08x} loc={:016x} {:02x} {}".format(
+            sub_prog, size, addr, typ, entry_name(typ)
+        ))
+        if size == 0xffffffff:
+            continue
+        if size > len(data):
+            continue
+
+        match typ:
+            # Recurse into subdirectories
+            case 0x40: parse_directory(fn, data, addr)
+            case 0x48: 
+                arr = unpack("<8L", data[addr:addr+0x20])
+                level2_off = arr[4]
+                parse_backup_directory(fn, data, level2_off)
+            case 0x4a: 
+                arr = unpack("<8L", data[addr:addr+0x20])
+                level2_off = arr[4]
+                parse_backup_directory(fn, data, level2_off)
+            # BIOS Directory table
+            case 0x46: continue
+            # Parse entries
+            case _: parse_entry(fn, typ, data, addr, size)
+
+
+# NOTE: Need to validate this strategy
+def get_addr(img_sz, off):
+    """ Get the appropriate offset into the image """
+    base_offset = img_sz & 0x000fffff
+    if img_sz >= 0x02000000:
+        return (off & 0x00ffffff) + base_offset
+    elif img_sz >= 0x01000000:
+        return (off & 0x00ffffff) + base_offset
+    elif img_sz >= 0x00800000:
+        return (off & 0x007fffff) + base_offset
+    else:
+        raise Exception("Unhandled image size {:08x}".format(img_sz))
+    #match img_sz:
+    #    case 0x02000000: return (off & 0x01ffffff)
+    #    case 0x02001000: return (off & 0x01ffffff) + 0x00001000
+    #    case 0x01001000: return (off & 0x00ffffff) + 0x00001000
+    #    case 0x01000800: return (off & 0x00ffffff) + 0x00000800
+    #    case 0x01000000: return (off & 0x00ffffff)
+    #    case 0x00801000: return (off & 0x007fffff) + 0x00001000
+    #    case 0x00800800: return (off & 0x007fffff) + 0x00000800
+    #    case 0x00800000: return (off & 0x007fffff)
+    #    case _:
+    #        raise Exception("Unhandled image size {:08x}".format(img_sz))
+
+
+
+def parse_directory(fn, data, off, backup_dir=False):
+    """ Parse a PSP Directory """
+
+    MAX_ENTRIES = 40
+    hdr_off = off
+    ent_off = hdr_off + 0x10
+    hdr_data = data[hdr_off:hdr_off+0x10]
+    chksum, num_ent, reserved = unpack("<LLL", hdr_data[0x04:])
+    print("reserved={:08x}".format(reserved))
 
     match data[hdr_off:hdr_off+0x04]:
         case b'$PSP': 
             print("[*] Found PSP Directory    off={:08x} num_ent={:08x}".format(
                 off, num_ent))
-            if num_ent > 37:
+            if num_ent > MAX_ENTRIES:
                 print("Skipping directory (has {:08x} entries??)".format(num_ent))
                 return
         case b'$PL2': 
             print("[*] Found PSP L2 Directory off={:08x} num_ent={:08x}".format(
                 off, num_ent))
-            if num_ent > 37:
+            if num_ent > MAX_ENTRIES:
                 print("Skipping directory (has {:08x} entries??)".format(num_ent))
                 return
         case _: 
-            raise Exception("Invalid directory (magic {})".format(off[0x00:0x04]))
+            print(hexdump(data[hdr_off:hdr_off+0x100]))
+            raise Exception("Invalid directory (magic {})".format(hdr_data[0x00:0x04]))
+            exit()
 
-    print("Parsing directory ({} entries) ...".format(num_ent))
+    print("Parsing directory @ {:08x} ({} entries) ...".format(off, num_ent))
     ent_data = data[ent_off:(ent_off + (num_ent * 0x10))]
     for (typ, sub_prog, _, size, loc) in iter_unpack("<BBHLQ", ent_data):
-        print("subprog={:04x} size={:08x} loc={:016x} {:02x} {}".format(
+        print("  subprog={:04x} size={:08x} loc={:016x} {:02x} {}".format(
             sub_prog, size, loc, typ, entry_name(typ)
         ))
-        if size == 0xffffffff or size == 0: continue
 
-        # The offsets depend on the size of the firmware image
-        # This is kinda ugly, but it works
-        if   len(data) == 0x02000000: addr = (loc & 0x00ffffff)
-        elif len(data) == 0x02001000: addr = (loc & 0x00ffffff) + 0x1000
-        elif len(data) == 0x01001000: addr = (loc & 0x00ffffff) + 0x1000
-        elif len(data) == 0x01000800: addr = (loc & 0x00ffffff) + 0x0800
-        elif len(data) == 0x01000000: addr = (loc & 0x00ffffff)
-        elif len(data) == 0x00801000: addr = (loc & 0x007fffff) + 0x1000
-        elif len(data) == 0x00800000: addr = (loc & 0x007fffff)
-        else:
-            raise Exception("Unhandled image size {:08x}".format(len(data)))
-        if off >= 0x01000000: addr += 0x01000000
+        # Soft-fuse bits are encoded in the entry address
+        # (see coreboot for these flag definitions)
+        if typ == 0x0b:
+            set_bits = []
+            for i in range(0, 64):
+                if ((loc & (1 << i)) != 0): 
+                    set_bits.append(i)
+            debug_en = (loc & (1 << 0))  != 0
+            diag_bl  = (loc & (1 << 5))  != 0
+            unk_6    = (loc & (1 << 6))  != 0
+            post_dis = (loc & (1 << 7))  != 0
+            espi_en  = (loc & (1 << 15)) != 0
+            unk_28   = (loc & (1 << 28)) != 0
+            mp2_dis  = (loc & (1 << 29)) != 0
+            unk_35   = (loc & (1 << 35)) != 0
+            soi3_en  = (loc & (1 << 58)) != 0
+            print(" Softfuse bits={}".format(set_bits))
+            #print(" Enable Secure Debug Unlock:    {}".format(debug_en))
+            #print(" Enable diagnostic bootloader?  {}".format(diag_bl))
+            #print(" Disable port 80 post codes:    {}".format(post_dis))
+            #print(" Use eSPI instead of LPC:       {}".format(espi_en))
+            #print(" Disable MP2/SMU firmware load: {}".format(mp2_dis))
+            #print(" Enable verstage in S0i3:       {}".format(soi3_en))
+            continue
+
+        if size == 0xffffffff: continue
+        if size > len(data): continue
+
+        # NOTE: Backup directories are always size zero?
+        if typ not in [0x49, 0x4a] and size == 0: 
+            continue
+
+        # Compute the offset ('addr') of the data for this entry.
+        addr = get_addr(len(data), loc)
+        if off >= 0x01000000: 
+            addr += 0x01000000
 
         match typ:
             # Recurse into subdirectories
-            case 0x40:
+            case 0x40: 
                 parse_directory(fn, data, addr)
-            # BIOS Directory table
-            case 0x46:
+            # Recurse into backup directory
+            case 0x48: 
+                arr = unpack("<6L", data[addr:addr+0x18])
+                for x in arr: print("{:016x}".format(x))
+                level2_off = arr[4] + 0x1000
+                #print(hexdump(data[level2_off:level2_off+0x100]))
+                parse_backup_directory(fn, data, level2_off)
+            # Recurse into backup directory
+            case 0x4a: 
+                arr = unpack("<6L", data[addr:addr+0x18])
+                for x in arr: print("{:016x}".format(x))
+                level2_off = arr[4] + 0x1000
+                #print(hexdump(data[level2_off:level2_off+0x100]))
+                parse_backup_directory(fn, data, level2_off)
+            # Skip BIOS Directory table? 
+            case 0x46: 
                 continue
-            # Parse entries
-            case _:
+            # Assume all other entries are files we can parse
+            case _: 
                 parse_entry(fn, typ, data, addr, size)
-        print()
 
 
 # I don't particularly care about looking at these entries right now
+# FIXME: You should just dump these anyway because why not.
 SKIP_TYPES = [
         # Key material
         0x00, 0x05, 0x09, 0x0a, 0x0d, 0x21, 0x43, 0x4e,
-        # Token Unlock data (always empty)
+
+        # Token Unlock data (always empty, hopefully).
+        # If this is anything like the softfuse entry, data might
+        # also be included in the size/offset fields?
         0x22,
-        # NVRAM data, should be flat binary data
-        0x04, 0x54,
+
         # Flat data, usually empty?
         0x38,
         # NOTE: Is this like, the x86 boot stub or something? No clue.
@@ -259,6 +416,13 @@ SKIP_TYPES = [
         0x29,
         # unknown blob
         0x63, 
+        # PN30-ASUS-0307.CAP, no idea
+        0x07,
+        # "embedded firmware signature"
+        0x2b,
+
+        # Haven't observed these outside of AM5 images?
+        0x55, 0x73, 0x49, 0x5a, 0x5d, 0x71, 0x76, 0x91, 0x8d,
 ]
 
 # Entry types with a consistent 0x100-byte header
@@ -271,15 +435,28 @@ HDR_TYPES = [
         0x50, 0x51, 0x58, 0x59, 0x5c,
         # These seem like the ABL entries, maybe old?
         0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6,
+        # What is this even? "RCFG3328A_FW"?
+        0x93,
+        # I think this was in some Hygon image?
+        0x11,
 ]
 
 def parse_entry(fn, typ, data, off, size):
     """ Parse an entry in some PSP directory """
-    if typ in SKIP_TYPES: return;
+
+    #print(hexdump(data[off:off+0x200]))
+    if typ in SKIP_TYPES: 
+        return;
+
     edata = data[off:off+size]
+    if size < 0x10:
+        print("Skipping entry of size {:08x}".format(size))
+        print(hexdump(edata))
+        return;
+
     if typ in HDR_TYPES:
         hdr_data   = edata[0x000:0x100]
-        print(hexdump(hdr_data))
+        #print(hexdump(hdr_data))
         content    = edata[0x100:]
 
         # Don't know exactly what this is
@@ -316,8 +493,6 @@ def parse_entry(fn, typ, data, off, size):
         # Wrapped key
         wkey_bytes =              hdr_data[0x080:0x090]
 
-        print("{:08x}".format(addr))
-
         #print("size        {:08x}".format(size))
         #print("magic       {}".format(magic))
         #print("signed size {:08x}".format(sz_signed))
@@ -336,55 +511,43 @@ def parse_entry(fn, typ, data, off, size):
         # Skip any encrypted entries (for now?) - we'd need to unwrap the
         # IKEK, and I'm pretty sure this involves using the CCP? 
         # Linux CCP drivers seem to be broken on lots of client machines
-        # due to UEFI firmware issues (including mine)
-        if is_enc: 
-            print("[*] Skipping encrypted entry")
-            return
+        # due to UEFI firmware issues (including mine).
+        if is_enc: return
 
         # Handle compressed entries
         if not is_comp:
             fdata = content
         else:
             cdata = content[0:comp_sz]
-            match cdata[0x00:0x02]:
-                case b'\x78\xda': print("[*] zlib best compression")
-                case b'\x78\x9c': print("[*] zlib default compression")
-                case b'\x78\x5e': print("[*] zlib compressed")
-                case b'\x78\x01': print("[*] zlib no compression")
-                case _: 
-                    # Not exactly sure what's up with this
-                    print("[!] No zlib header?")
-                    return
+            #match cdata[0x00:0x02]:
+            #    case b'\x78\xda': print("[*] zlib best compression")
+            #    case b'\x78\x9c': print("[*] zlib default compression")
+            #    case b'\x78\x5e': print("[*] zlib compressed")
+            #    case b'\x78\x01': print("[*] zlib no compression")
+            #    case _: 
+            #        # Not exactly sure what's up with this
+            #        print("[!] No zlib header?")
+            #        return
             try:
                 udata = zlib.decompress(cdata)
             except zlib.error as e:
                 print("[!] Failed to decompress")
                 print(hexdump(cdata[0:0x100]))
                 return
-            print("[*] Decompressed to {:08x} bytes".format(len(udata)))
             if len(udata) != uncomp_sz:
                 raise Exception("Uncompressed less data than expected")
             fdata = udata
-
     # This entry has no defined format; this is the best we can do for now
     else:
         version = 0
         fdata = edata
-        print("[!] No defined formatting for this entry")
-        print(hexdump(fdata))
-        raise Exception("Undefined entry format")
+        print("[!] No format defined for entry {:02x}".format(typ))
+        #print(hexdump(fdata))
+        #raise Exception("Undefined entry format")
 
-    sha1 = hashlib.sha1(fdata).hexdigest()
-    if LIBRARY[typ].get(sha1) != None:
-        LIBRARY[typ][sha1]['obs'] += 1
-    else:
-        LIBRARY[typ][sha1] = { 
-            "file": fn, 
-            "size": len(fdata), 
-            "obs": 1,
-            "data": fdata,
-            "ver": version,
-        }
+    # Try to add this entry to the library
+    add_to_library(fn, typ, fdata, version)
+
 
 def parse_image(fn, data):
     """ Find and parse all of the PSP directories in a firmware image """
@@ -394,11 +557,36 @@ def parse_image(fn, data):
         parse_directory(fn, data, off)
         print()
 
+def print_library():
+    # Print all of the unique entries we observed
+    lib_size = 0
+    ent_size = 0
+    for t in LIBRARY:
+        if len(LIBRARY[t]) == 0: 
+            continue
+        print("Observed for Type {:02x} ({})".format(int(t), entry_name(int(t))))
+        for sha1 in LIBRARY[t]:
+            size = LIBRARY[t][sha1]['size']
+            fn   = LIBRARY[t][sha1]['file']
+            obs  = LIBRARY[t][sha1]['obs']
+            ver  = LIBRARY[t][sha1]['ver']
+            lib_size += size
+            ent_size += 1
+            print("  {} ver={:08x} size={:08x} obs={:08} file={}".format(
+                sha1, ver, size, obs, fn
+            ))
+        print()
+    print("Library has {} entries ({:.2f}MiB)".format(
+        ent_size, lib_size / (1000*1000))
+    )
 
 if __name__ == "__main__":
+
     if len(argv) < 2:
         print("usage: amdpsp-dig [files]")
+        print_library()
         exit(-1)
+
     # Parse all of the provided files
     for filename in argv[1:]:
         with open(filename, "rb") as f:
@@ -408,24 +596,12 @@ if __name__ == "__main__":
             )
             parse_image(filename, data)
             print("="*80)
-    ## Print all of the unique entries we observed
-    for x in LIBRARY:
-        if len(LIBRARY[x]) == 0: continue
-        print("Observed for Type {:02x} ({})".format(x, entry_name(x)))
-        for sha1 in LIBRARY[x]:
-            size = LIBRARY[x][sha1]['size']
-            fn   = LIBRARY[x][sha1]['file']
-            obs  = LIBRARY[x][sha1]['obs']
-            ver  = LIBRARY[x][sha1]['ver']
-            print("  {} ver={:08x} size={:08x} file={} obs={}".format(
-                sha1, ver, size, fn, obs
-            ))
 
-            # Write all unique images to /tmp/
-            outfn = "{}_{:08x}_{}.bin".format(entry_filename(x), ver, sha1[0:8])
-            outpath = "/tmp/{}".format(outfn)
-            #with open(outpath, "wb") as f: f.write(LIBRARY[x][sha1]['data'])
+    with open(LIBRARY_FILE, "w") as f:
+        json.dump(LIBRARY, f)
+        print("Saved to {}".format(LIBRARY_FILE))
 
-        print()
+    print_library()
+
 
 

@@ -15,7 +15,6 @@ The actual entry data typically starts with a 256-byte header which includes
 - The size of the data
 - A version number
 - A load address
-- Other things I don't understand yet
 
 ## First-stage Bootloader
 
@@ -47,7 +46,7 @@ Initially, the MMU is configured to enforce some distinction between:
 
 These other programs are typically loaded and entered at `0x0001_5000` in 
 unprivileged mode. On top of this, the `SVC` exception handler implements a 
-syscall interface exposed to unprivileged programs (via the `SVC` instruction).
+syscall interface exposed to subsequent unprivileged programs.
 
 Execution in the second-stage bootloader also seems to rely on the particular 
 "boot mode" (i.e. a cold boot vs. various types of warm boot).
@@ -67,7 +66,7 @@ training, and MBIST?
 ## TEE/Trusted OS 
 
 Haven't looked at this at all. Presumably runs applications that handle 
-requests from x86-land (UEFI firmware and post-boot)?
+requests from x86-land (UEFI firmware, SMM, other post-boot services)?
 
 ...
 
